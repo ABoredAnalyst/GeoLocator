@@ -1,9 +1,12 @@
-#Description:
-#Scrapes ARP cache and looks for matching MACs associated with GL.iNET devices or Raspberry Pis (PiKVMs)
-#If no matching devices are found in cache, script then performs a basic ping sweep in an attempt to populate it
-#Advise adding a known MAC to mac_device_map to test functionality when running
+# -----------------------------------------------------------------------------
+# SCRIPT: SuspiciousNetNeighbors.py
+# DESCRIPTION: Scrapes ARP cache and looks for matching MACs associated with 
+#			   GL.iNET devices or Raspberry Pis (PiKVMs). If no matching devices 
+#			   are found in cache, script performs a basic ping sweep in an 
+#			   attempt to populate it. Advise adding a known MAC to mac_device_map
+#			   to test functionality when running.
 
-
+# -----------------------------------------------------------------------------
 import subprocess
 import platform
 import re
@@ -17,10 +20,8 @@ import sys
 
 def get_arp_entries():
 	try:
-		# Windows-only: use `arp -a` output
 		proc = subprocess.run(['arp', '-a'], capture_output=True, text=True, check=True)
 		out = proc.stdout
-		# Windows format: IP  MAC  type
 		pattern = re.compile(r'([0-9]+(?:\.[0-9]+){3})\s+([0-9A-Fa-f:-]{14,17})')
 	except Exception:
 		return []
@@ -66,7 +67,7 @@ def main():
 	# (derived from the local IPv4 address) to populate the ARP cache, then
 	# re-parse the ARP table and check again.
 	if not matches:
-		# determine local IPv4 to derive the /24 prefix (Windows-only)
+		# determine local IPv4 to derive the /24 prefix
 		def get_local_ipv4():
 			try:
 				p = subprocess.run(['ipconfig'], capture_output=True, text=True, check=True)
@@ -93,7 +94,6 @@ def main():
 						return
 					ips = [f"{pref}.{i}" for i in range(1, 255)]
 
-				# Windows-only ping parameters
 				cmd = ['ping', '-n', '1', '-w', '200']
 
 				def _ping(target):
