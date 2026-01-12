@@ -48,12 +48,13 @@ Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationA
 ```
 This is the equivalent of going into Settings > Privacy & security > Location and enabling Location Services. You should now be able to copy the script to your machine and run via Powershell.
 
-It's worth mentioning that I included two versions of the script to choose from. There is no difference in their functionality, just their format.
+It's worth mentioning that I included multiple versions of the script to choose from. There is no difference in their functionality, just their format.
 
-GeoWatcher.ps1 is the standard powershell script that you can import into your RMM tool and run, or drop on the device and execute remotely.
-
-GeoWatcherOneLine.ps1 is the same script, but formatted as a single line, allowing you to copy and paste it directly into a terminal. When using PowerShell through Cortex XDR Live Terminal, it didn't seem to like scripts, so this was the easiest way for me to get around that issue.
-
+* GeoLocator.ps1 is the standard powershell script that you can import into your RMM tool and run, or drop on the device and execute remotely.
+* GeoLocator.py performs the exact same functionality, but python.
+* GeoLocatorXDR.py is a python version that can be ran through various EDR/XDR/RMM tools. I made this because Cortex XDR only allowed python scripts to be ran from their agent library, but it was very limited on the modules you could use.
+* ScheduledGeoLocator.ps1 is a powershell script meant to be triggered from a scheduled task to run the GeoLocator script on a daily basis. It logs all results to the Application log beneath event IDs 2001 and 2002. This will receive its own README.
+*SuspiciousNetNeighbors.py is a python script for checking a machine's ARP cache table for various suspicious devices, such as GL.iNET routers. Can assist with potentially detecting users that may be hiding their location. Will receive its own README.
 # Troubleshooting
 
 The main purpose of these troubleshooting notes is for when you are trying to run this script on a machine where you do not have physical access to it and can only access the machine via a remote PowerShell terminal.
