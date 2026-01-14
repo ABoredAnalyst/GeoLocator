@@ -1,278 +1,304 @@
-# -----------------------------------------------------------------------------
-# SCRIPT: GeoLocator.ps1
-# DESCRIPTION: First validates that location is enabled, checks Wi-Fi and 
-#              Airplane Mode status, then retrieves geolocation and reverse
-#              geocodes the coordinates into a human-readable address.
-# REQUIREMENTS: Windows Location Services must be enabled and permission granted.
-# -----------------------------------------------------------------------------
+## -- Classes --
+Class LocationEventInfo {
+    [string]$IPAddress = "Unknown"
+    [string]$ISP = "Unknown"
+    [string]$Latitude = "Unknown"
+    [string]$Longitude = "Unknown"
+    [string]$TimeStamp = "Unknown"
+    [string]$ResolvedAddress = "Unknown"
+    [string]$MapLink = "Unknown"
+    
+    LocationEventInfo(){}
 
-# 1. Diagnostic Checks - Verify prerequisites
-
-Write-Host ""
-Write-Host "===============================" -ForegroundColor Cyan
-Write-Host "           Diagnostics         " -ForegroundColor Cyan
-Write-Host "===============================" -ForegroundColor Cyan
-Write-Host ""
-
-# Check Location Enable/Disable status
-$locPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'
-$locationEnabled = $true
-if (Test-Path $locPath) {
-    $locProps = Get-ItemProperty -Path $locPath -ErrorAction SilentlyContinue
-    if ($null -ne $locProps -and $locProps.PSObject.Properties.Name -contains 'DisableLocation') {
-        $disable = [int]$locProps.DisableLocation
-        if ($disable -ne 0) {
-            $locationEnabled = $false
-        }
-    }
-}
-
-# Check AppPrivacy LetAppsAccessLocation
-$appPrivPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
-if (Test-Path $appPrivPath) {
-    $appProps = Get-ItemProperty -Path $appPrivPath -ErrorAction SilentlyContinue
-}
-
-# Check Wi-Fi status
-$wifiEnabled = $false
-try {
-    $netshOutput = netsh wlan show interfaces 2>$null
-    if ($LASTEXITCODE -eq 0 -and $netshOutput) {
-        if ($netshOutput -match 'Radio status' -and $netshOutput -match 'Hardware On' -and $netshOutput -match 'Software On') {
-            $wifiEnabled = $true
-        }
-        elseif ($netshOutput -match 'State\s*:\s*connected') {
-            $wifiEnabled = $true
-        }
-    }
-}
-catch { }
-if (-not $wifiEnabled) {
-    $adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wireless' -or $_.Name -match 'Wi-Fi' -or $_.Name -match 'Wireless' }
-    if ($null -ne $adapters) {
-        foreach ($a in $adapters) {
-            if ($a.Status -eq 'Up') {
-                $wifiEnabled = $true
-                break
-            }
-        }
-    }
-}
-
-$ssidCount = 0
-if ($wifiEnabled) {
-        $wifiStatus = 'Enabled/Available'
-        $wifiColor = 'Green'
-    try {
-        $netshNetworks = netsh wlan show networks 2>$null
-        if ($netshNetworks) {
-            $ssidCount = ($netshNetworks | Select-String -Pattern '^SSID\s+\d+\s+:' | Measure-Object).Count
-        }
-    }
-    catch { $ssidCount = 0 }
-} else {
-    $wifiStatus = 'Not available or disabled'
-    $wifiColor = 'Red'
-}
-
-# Check Airplane Mode status
-$radioReg = 'HKLM:\System\CurrentControlSet\Control\RadioManagement\SystemRadioState'
-$airplaneOn = $false
-if (Test-Path $radioReg) {
-    $reg = Get-ItemProperty -Path $radioReg -ErrorAction SilentlyContinue
-    if ($null -ne $reg) {
-        if ($reg.PSObject.Properties.Name -contains '(default)') {
-            $val = $reg.'(default)'
-        }
-        elseif ($reg.PSObject.Properties.Name -contains '') {
-            $val = $reg.''
-        }
-        else {
-            $val = $null
-        }
-        if ($null -ne $val -and [int]$val -eq 1) {
-            $airplaneOn = $true
-        }
-    }
-}
-
-
-
-$airplaneStatus = if ($airplaneOn) { 'Enabled' } else { 'Disabled' }
-$airplaneColor = if ($airplaneOn) { 'Red' } else { 'Green' }
-
-Write-Host ""
-$locationStatus = if ($locationEnabled) { 'Enabled' } else { 'Disabled' }
-$locationColor = if ($locationEnabled) { 'Green' } else { 'Red' }
-Write-Host ("{0,-22}: {1}" -f 'Location Services', $locationStatus) -ForegroundColor $locationColor
-Write-Host ("{0,-22}: {1}" -f 'Wi-Fi', $wifiStatus) -ForegroundColor $wifiColor
-Write-Host ("{0,-22}: {1}" -f 'Visible Network Count', $ssidCount) -ForegroundColor Green
-Write-Host ("{0,-22}: {1}" -f 'Airplane Mode', $airplaneStatus) -ForegroundColor $airplaneColor
-Write-Host ""
-
-# Warn if Wi-Fi is disabled or Airplane Mode is enabled
-if (-not $wifiEnabled -or $airplaneOn) {
-    Write-Host "Unable to perform Wi-Fi triangulation. GeoLocation will be based off of IP address. Accuracy may vary." -ForegroundColor Yellow
-}
-
-# If location services are disabled, do not attempt to launch GeoLocator
-if (-not $locationEnabled) {
-    Write-Host "Unable to launch GeoLocator due to location permissions. Please verify that location permissions and services are enabled before trying again." -ForegroundColor Red
-
-    # Location Permissions Section Header
-    Write-Host ""
-    Write-Host "===============================" -ForegroundColor Cyan
-    Write-Host "      Location Permissions     " -ForegroundColor Cyan
-    Write-Host "===============================" -ForegroundColor Cyan
-    Write-Host ""
-
-    $locPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'
-    if (Test-Path $locPath) {
-        Write-Host "Registry key exists: $locPath" -ForegroundColor Green
-        $locProps = Get-ItemProperty -Path $locPath -ErrorAction SilentlyContinue
-        if ($null -ne $locProps -and $locProps.PSObject.Properties.Name -contains 'DisableLocation') {
-            $disable = [int]$locProps.DisableLocation
-            if ($disable -eq 0) {
-                Write-Host "DisableLocation: 0 (Location services enabled)" -ForegroundColor Green
-            } else {
-                Write-Host "DisableLocation: 1 (Location services disabled)" -ForegroundColor Red
-            }
-        } else {
-            Write-Host "DisableLocation value is missing (default: enabled)" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "Registry key missing: $locPath (default: enabled)" -ForegroundColor Red
-    }
-
-    $appPrivPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
-    if (Test-Path $appPrivPath) {
-        Write-Host "Registry key exists: $appPrivPath" -ForegroundColor Green
-        $appProps = Get-ItemProperty -Path $appPrivPath -ErrorAction SilentlyContinue
-        if ($null -ne $appProps -and $appProps.PSObject.Properties.Name -contains 'LetAppsAccessLocation') {
-            $val = [int]$appProps.LetAppsAccessLocation
-            if ($val -eq 1) {
-                Write-Host "LetAppsAccessLocation: 1 (Enabled)" -ForegroundColor Green
-            } else {
-                Write-Host "LetAppsAccessLocation: $val (Disabled)" -ForegroundColor Red
-            }
-        } else {
-            Write-Host "LetAppsAccessLocation value is missing" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "Registry key missing: $appPrivPath" -ForegroundColor Red
-    }
-
-    return
-}
-
-# 2. Load the necessary .NET Assembly for Geolocation services
-try {
-    Add-Type -AssemblyName System.Device
-}
-catch {
-    Write-Error "Failed to load System.Device assembly. Geolocation services may be unavailable."
-    exit 1
-}
-
-# 3. Initialize the GeoLocator
-$GeoLocator = New-Object System.Device.Location.GeoCoordinateWatcher
-$TimeoutSeconds = 5 # Set a maximum wait time
-$StartTime = Get-Date
-
-Write-Host "Starting GeoLocator. Waiting up to $TimeoutSeconds seconds for coordinates..."
-
-# Start the locator
-$GeoLocator.Start()
-
-# 4. Wait for the locator to become ready, checking status and permissions
-$IsReady = $false
-$permissionDenied = $false
-while ((Get-Date) -le ($StartTime).AddSeconds($TimeoutSeconds)) {
-    if ($GeoLocator.Status -eq 'Ready') {
-        $IsReady = $true
-        break
-    }
-    if ($GeoLocator.Permission -eq 'Denied') {
-        # Do not exit here. Record that permission was denied so we can
-        # finish diagnostics and exit gracefully later.
-        $permissionDenied = $true
-        Write-Host "Location services: Disabled"
-        break
-    }
-    Start-Sleep -Milliseconds 250
-}
-
-# Define status messages for better error reporting
-$statusMap = @{
-    'Disabled'       = "Location access has been disabled in system settings."
-    'NotInitialized' = "Location provider is initializing."
-    'NoData'         = "Location provider is not returning data."
-    'Unknown'        = "Location status is unknown."
-    'Denied'         = "Location access was explicitly denied by the user/system."
-}
-
-# 5. Process the Location Data and Resolve Address
-if ($permissionDenied) {
-    # Permission was denied by the system/user. Stop locator and inform the user.
-    try { $GeoLocator.Stop() } catch { }
-    Write-Host "Unable to start GeoLocator. Please check Location Services Permissions and try again."
-}
-elseif (-not $IsReady) {
-    $currentStatus = $GeoLocator.Status
-    $errorMessage = $statusMap[$currentStatus]
-    if (-not $errorMessage) {
-        $errorMessage = "Timed out waiting for GPS coordinates. Status: $currentStatus"
-    }
-    Write-Warning $errorMessage
-}
-else {
-    $location = $GeoLocator.Position.Location
-
-    if ($null -ne $location -and $location.IsUnknown -eq $false) {
-        $latitude = $location.Latitude
-        $longitude = $location.Longitude
-        # Use ISO 8601 format for robust timestamps
-        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-
-        Write-Host ""
-        Write-Host "===============================" -ForegroundColor Cyan
-        Write-Host "      GeoLocator Results    " -ForegroundColor Cyan
-        Write-Host "===============================" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host ("{0,-22}: {1}" -f 'Latitude', $latitude) -ForegroundColor Magenta
-        Write-Host ("{0,-22}: {1}" -f 'Longitude', $longitude) -ForegroundColor Magenta
-        Write-Host ("{0,-22}: {1}" -f 'Timestamp', $timestamp) -ForegroundColor Magenta
-
-        # 6. Reverse Geocode Coordinates using OpenStreetMap Nominatim
+    GetIpData() {
         try {
-            # The URL for the Nominatim reverse lookup
-            $nominatimUrl = "https://nominatim.openstreetmap.org/reverse?format=json&lat=$latitude&lon=$longitude"
-
-            # Use a User-Agent header as a courtesy to public APIs
-            $headers = @{'User-Agent' = 'PowerShell Script (Personal Use)' }
-
-            # Fetch location data from the API
-            $locationData = Invoke-RestMethod -Uri $nominatimUrl -Headers $headers -ErrorAction Stop
-
-            $locationName = $locationData.display_name
-            $googleMapsUrl = "https://www.google.com/maps?q=$latitude,$longitude"
-
-            Write-Host ("{0,-22}: {1}" -f 'Resolved Address', $locationName) -ForegroundColor Cyan
-            Write-Host ("{0,-22}: {1}" -f 'Google Maps Link', $googleMapsUrl) -ForegroundColor Cyan
-
-            # Only output formatted results above; do not emit PSCustomObject
-        }
-        catch {
-            Write-Warning "Could not resolve address via Nominatim API. Error: $($_.Exception.Message)"
-            Write-Host ("{0,-22}: {1}" -f 'Resolved Address', 'Address resolution failed (API error).') -ForegroundColor Red
-            Write-Host ("{0,-22}: {1}" -f 'Google Maps Link', "https://www.google.com/maps?q=$latitude,$longitude") -ForegroundColor Cyan
-            # Only output formatted results above; do not emit PSCustomObject
+            $ipinfo = Invoke-RestMethod -Uri "https://ipinfo.io/json" -ErrorAction Stop
+            $this.IPAddress = $ipinfo.ip
+            if ($ipinfo.org) { 
+                $this.ISP = $ipinfo.org 
+            } 
+        } catch {
+            $this.IPAddress = "Error retrieving IP"
+            $this.ISP = "Error retrieving ISP"
         }
     }
-    else {
-        Write-Warning 'GPS coordinates could not be resolved or are unknown.'
+
+    GetGeoData() {
+        try {
+            Add-Type -AssemblyName System.Device
+            $GeoLocator = New-Object System.Device.Location.GeoCoordinateWatcher
+            $GeoLocator.Start()
+            $TimeoutSeconds = 5
+            $StartTime = Get-Date
+            $IsReady = $false
+            while ((Get-Date) -le ($StartTime).AddSeconds($TimeoutSeconds)) {
+                if ($GeoLocator.Status -eq 'Ready') {
+                    $IsReady = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            if ($IsReady) {
+                $location = $GeoLocator.Position.Location
+                if ($null -ne $location -and $location.IsUnknown -eq $false) {
+                    $this.Latitude = $location.Latitude
+                    $this.Longitude = $location.Longitude
+                    $this.TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    $GeoLocator.Stop()
+                } else {
+                    Write-Warning 'GPS coordinates could not be resolved or are unknown.'
+                }
+            } else {
+                Write-Warning "Timed out waiting for GPS coordinates. Status: $($GeoLocator.Status)"
+            }
+        } catch {
+            $this.Latitude = "Unknown"
+            $this.Longitude = "Unknown"
+            $this.TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Write-Warning "Error during geolocation: $($_.Exception.Message)"
+        }
+    }
+
+    GetMapData() {
+        if ($this.Latitude -ne "Unknown" -and $this.Longitude -ne "Unknown") {
+            $Lat = $this.Latitude
+            $Long = $this.Longitude
+            try {
+                $nominatimUrl = "https://nominatim.openstreetmap.org/reverse?format=json&lat=$Lat&lon=$Long"
+                $headers = @{ 'User-Agent' = 'PowerShell Script (Personal Use)' }
+                $locationData = Invoke-RestMethod -Uri $nominatimUrl -Headers $headers -ErrorAction Stop
+                $this.ResolvedAddress = $locationData.display_name
+                $this.MapLink = "https://www.google.com/maps?q=$Lat,$Long"
+            } catch {
+                $this.ResolvedAddress = "Address resolution failed (API error)."
+                $this.MapLink = "https://www.google.com/maps?q=$Lat,$Long"
+                Write-Warning "Could not resolve address via Nominatim API. Error: $($_.Exception.Message)"
+            }
+        }
     }
 }
 
-# Stop the locator to free resources
-$GeoLocator.Stop()
+Class SystemConfigInfo {
+    [string]$LocationPermission
+    [bool]$LocationServiceStatus
+    [string]$ConsentStoreLocation
+    [string]$WifiStatus
+    [int]$SSIDCount
+    [bool]$AirplaneMode
+   
+    GetLocationStatus() {
+        $locationReg = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'
+        $this.LocationPermission = 'Unknown'
+        if (Test-Path $locationReg) {
+            $locRegVal = Get-ItemProperty -Path $locationReg -ErrorAction SilentlyContinue
+            if ($null -ne $locRegVal -and $locRegVal.PSObject.Properties.Name -contains 'DisableLocation') {
+                $disableLocation = $locRegVal.DisableLocation
+                if ($disableLocation -eq 0) {
+                    $this.LocationPermission = 'Enabled'
+                } elseif ($disableLocation -eq 1) {
+                    $this.LocationPermission = 'Disabled'
+                }
+            }
+        }
+    }
+
+    GetLocationServiceStatus() {
+        $locationRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\lfsvc\Service\Configuration"
+        try {
+            $locationReg = Get-ItemProperty -Path $locationRegPath -Name "Status" -ErrorAction Stop
+            if ($locationReg.Status -eq 1) {
+                $this.LocationServiceStatus = $True
+            } else {
+                $this.LocationServiceStatus = $False
+            }
+        } catch {
+            $this.LocationServiceStatus = $False
+        }
+    }
+
+    GetConsentStore() {
+        $consentReg = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location'
+        $this.ConsentStoreLocation = 'Unknown'
+        if (Test-Path $consentReg) {
+            try {
+                $val = Get-ItemProperty -Path $consentReg -Name 'Value' -ErrorAction Stop
+                $this.ConsentStoreLocation = $val.Value
+            } catch {
+                $this.ConsentStoreLocation = 'Error reading registry'
+            }
+        } else {
+            $this.ConsentStoreLocation = 'Not Found'
+        }
+    }
+
+    GetWifiStatus() {
+        try {
+            $netshOutput = netsh wlan show interfaces 2>$null
+            if ($LASTEXITCODE -eq 0 -and $netshOutput) {
+                $lines = $netshOutput -split "`n"
+                $radioStatusFound = $false
+                
+                for ($i = 0; $i -lt $lines.Length; $i++) {
+                    if ($lines[$i] -match "Radio status") {
+                        $radioStatusFound = $true
+                        # Look for software radio status in the next few lines
+                        for ($j = $i + 1; $j -lt [Math]::Min($i + 11, $lines.Length); $j++) {
+                            $line = $lines[$j].Trim()
+                            if ($line -match "^\s*Software") {
+                                if ($line -match ":") {
+                                    $radioSw = ($line -split ":", 2)[1].Trim()
+                                } else {
+                                    $parts = $line -split "\s+", 2
+                                    if ($parts.Length -gt 1) {
+                                        $radioSw = $parts[1].Trim()
+                                    } else {
+                                        $radioSw = "Unknown"
+                                    }
+                                }
+                                $this.WifiStatus = if ($radioSw -eq "On") { "Enabled" } else { "Disabled" }
+                                return
+                            }
+                        }
+                        break
+                    }
+                }
+                
+                if ($radioStatusFound) {
+                    $this.WifiStatus = "Unknown"
+                } else {
+                    $this.WifiStatus = "Not Present"
+                }
+            } else {
+                $this.WifiStatus = "Not Present"
+            }
+        } catch {
+            $this.WifiStatus = "Error"
+        }
+    }
+
+    GetSsidCount() {
+        try {
+            $netshNetworks = netsh wlan show networks 2>$null
+            if ($netshNetworks) {
+                $this.SSIDCount = ($netshNetworks | Select-String -Pattern '^SSID\s+\d+\s+:' | Measure-Object).Count
+            } else {
+                $this.SSIDCount = 0
+            }
+        } catch { $this.SSIDCount = 0 }
+    }
+
+    GetAirplaneStatus() {
+        $RadioMgmtKey = "HKLM:\SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState"
+        try {
+            $RadioMgmtState = Get-ItemProperty $RadioMgmtKey -ErrorAction Stop
+            if ($RadioMgmtState.'(default)' -eq 0 ) {
+                $this.AirplaneMode = $False 
+            } else {
+                $this.AirplaneMode = $True 
+            }
+        } catch {
+            $this.AirplaneMode = $False
+        }
+    }
+
+    ScanConfig() {
+        $this.GetLocationStatus()
+        $this.GetConsentStore()
+        $this.GetLocationServiceStatus()
+        $this.GetWiFiStatus()
+        $this.GetSSIDCount()
+        $this.GetAirplaneStatus()
+    }
+}
+
+## -- Functions --
+function Write-DiagnosticsOutput($systemConfig) {
+    Write-Host ""
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host "           Diagnostics         " -ForegroundColor Cyan
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $locationColor = if ($systemConfig.LocationPermission -eq 'Enabled') { 'Green' } else { 'Red' }
+    $serviceColor = if ($systemConfig.LocationServiceStatus -eq $true) { 'Green' } else { 'Red' }
+    $consentColor = if ($systemConfig.ConsentStoreLocation -eq 'Allow') { 'Green' } else { 'Red' }
+    $wifiColor = if ($systemConfig.WifiStatus -eq 'Enabled') { 'Green' } else { 'Yellow' }
+    $airplaneColor = if ($systemConfig.AirplaneMode) { 'Red' } else { 'Green' }
+    
+    Write-Host ("{0,-25}: {1}" -f 'Location Permission', $systemConfig.LocationPermission) -ForegroundColor $locationColor
+    Write-Host ("{0,-25}: {1}" -f 'Location Service Status', $systemConfig.LocationServiceStatus) -ForegroundColor $serviceColor
+    Write-Host ("{0,-25}: {1}" -f 'Consent Store Location', $systemConfig.ConsentStoreLocation) -ForegroundColor $consentColor
+    Write-Host ("{0,-25}: {1}" -f 'Wi-Fi Status', $systemConfig.WifiStatus) -ForegroundColor $wifiColor
+    Write-Host ("{0,-25}: {1}" -f 'Visible Network Count', $systemConfig.SSIDCount) -ForegroundColor Green
+    Write-Host ("{0,-25}: {1}" -f 'Airplane Mode', $systemConfig.AirplaneMode) -ForegroundColor $airplaneColor
+    Write-Host ""
+}
+
+function Write-LocationOutput($locationInfo) {
+    Write-Host ""
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host "      GeoLocator Results       " -ForegroundColor Cyan
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    Write-Host ("{0,-22}: {1}" -f 'IP Address', $locationInfo.IPAddress) -ForegroundColor White
+    Write-Host ("{0,-22}: {1}" -f 'ISP', $locationInfo.ISP) -ForegroundColor White
+    Write-Host ("{0,-22}: {1}" -f 'Latitude', $locationInfo.Latitude) -ForegroundColor Magenta
+    Write-Host ("{0,-22}: {1}" -f 'Longitude', $locationInfo.Longitude) -ForegroundColor Magenta
+    Write-Host ("{0,-22}: {1}" -f 'Timestamp', $locationInfo.TimeStamp) -ForegroundColor Magenta
+    Write-Host ("{0,-22}: {1}" -f 'Resolved Address', $locationInfo.ResolvedAddress) -ForegroundColor Cyan
+    Write-Host ("{0,-22}: {1}" -f 'Google Maps Link', $locationInfo.MapLink) -ForegroundColor Cyan
+    Write-Host ""
+}
+
+## Main Logic
+try {
+    # Initialize classes and scan system configuration
+    $SystemConfig = [SystemConfigInfo]::new()
+    $SystemConfig.ScanConfig()
+    
+    # Display diagnostics
+    Write-DiagnosticsOutput $SystemConfig
+    
+    # Check if location services are properly configured
+    $canProceed = $true
+    if ($SystemConfig.LocationPermission -eq 'Disabled') {
+        Write-Host "Location services are disabled by policy. Cannot proceed with geolocation." -ForegroundColor Red
+        $canProceed = $false
+    }
+    
+    if ($SystemConfig.ConsentStoreLocation -eq 'Deny') {
+        Write-Host "Location access is denied in consent store. Cannot proceed with geolocation." -ForegroundColor Red
+        $canProceed = $false
+    }
+    
+    # Warn about potential issues
+    if ($SystemConfig.WifiStatus -eq 'Disabled' -or $SystemConfig.AirplaneMode) {
+        Write-Host "Warning: Wi-Fi is disabled or Airplane Mode is enabled. Location accuracy may be reduced." -ForegroundColor Yellow
+    }
+    
+    if ($canProceed) {
+        # Get location information
+        $LocationInfo = [LocationEventInfo]::new()
+        Write-Host "Retrieving IP information..." -ForegroundColor Yellow
+        $LocationInfo.GetIpData()
+        
+        Write-Host "Attempting to get GPS coordinates (timeout: 5 seconds)..." -ForegroundColor Yellow
+        $LocationInfo.GetGeoData()
+        
+        if ($LocationInfo.Latitude -ne "Unknown" -and $LocationInfo.Longitude -ne "Unknown") {
+            Write-Host "Resolving address from coordinates..." -ForegroundColor Yellow
+            $LocationInfo.GetMapData()
+        }
+        
+        # Display results
+        Write-LocationOutput $LocationInfo
+    } else {
+        Write-Host "Cannot proceed with geolocation due to permission/policy issues." -ForegroundColor Red
+    }
+    
+} catch {
+    Write-Error "An error occurred during execution: $($_.Exception.Message)"
+} finally {
+    Write-Host "Script execution completed." -ForegroundColor Green
+}
