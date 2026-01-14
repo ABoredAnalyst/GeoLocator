@@ -1,198 +1,330 @@
-# -----------------------------------------------------------------------------
-# SCRIPT: GeoLocator.py
-# DESCRIPTION: First validates that location is enabled, checks Wi-Fi and 
-#              Airplane Mode status, then retrieves geolocation and reverse
-#              geocodes the coordinates into a human-readable address.
-# REQUIREMENTS: Windows Location Services must be enabled and permission granted.
-# -----------------------------------------------------------------------------
+#Same functionality as GeoLocator.ps1. Script basically acts as a python wrapper to initiate the powershell script.
+#Created because Cortex XDR only supports python scripts in their Script Agent Library.
 
-import sys
-import ctypes
-import winreg
 import subprocess
-import json
-import requests
-import datetime
-import platform
+import sys
 
-def print_header(title):
-    print()
-    print("=" * 31)
-    print(f"{title.center(31)}")
-    print("=" * 31)
-    print()
+# Embed the full PowerShell script as a string
+ps_script = r'''
+## -- Classes --
+Class LocationEventInfo {
+    [string]$IPAddress = "Unknown"
+    [string]$ISP = "Unknown"
+    [string]$Latitude = "Unknown"
+    [string]$Longitude = "Unknown"
+    [string]$TimeStamp = "Unknown"
+    [string]$ResolvedAddress = "Unknown"
+    [string]$MapLink = "Unknown"
+    
+    LocationEventInfo(){}
 
-def color(text, color):
-    colors = {
-        "red": "\033[91m", "green": "\033[92m", "yellow": "\033[93m",
-        "cyan": "\033[96m", "magenta": "\033[95m", "reset": "\033[0m"
+    GetIpData() {
+        try {
+            $ipinfo = Invoke-RestMethod -Uri "https://ipinfo.io/json" -ErrorAction Stop
+            $this.IPAddress = $ipinfo.ip
+            if ($ipinfo.org) { 
+                $this.ISP = $ipinfo.org 
+            } 
+        } catch {
+            $this.IPAddress = "Error retrieving IP"
+            $this.ISP = "Error retrieving ISP"
+        }
     }
-    if sys.stdout.isatty():
-        return f"{colors.get(color, '')}{text}{colors['reset']}"
-    return text
 
-def check_registry_key(path, value_name):
-    try:
-        hive, subkey = path.split("\\", 1)
-        hive = getattr(winreg, hive)
-        with winreg.OpenKey(hive, subkey) as key:
-            value, _ = winreg.QueryValueEx(key, value_name)
-            return True, value
-    except FileNotFoundError:
-        return False, None
-    except OSError:
-        return True, None
+    GetGeoData() {
+        try {
+            Add-Type -AssemblyName System.Device
+            $GeoLocator = New-Object System.Device.Location.GeoCoordinateWatcher
+            $GeoLocator.Start()
+            $TimeoutSeconds = 5
+            $StartTime = Get-Date
+            $IsReady = $false
+            while ((Get-Date) -le ($StartTime).AddSeconds($TimeoutSeconds)) {
+                if ($GeoLocator.Status -eq 'Ready') {
+                    $IsReady = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            if ($IsReady) {
+                $location = $GeoLocator.Position.Location
+                if ($null -ne $location -and $location.IsUnknown -eq $false) {
+                    $this.Latitude = $location.Latitude
+                    $this.Longitude = $location.Longitude
+                    $this.TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    $GeoLocator.Stop()
+                } else {
+                    Write-Warning 'GPS coordinates could not be resolved or are unknown.'
+                }
+            } else {
+                Write-Warning "Timed out waiting for GPS coordinates. Status: $($GeoLocator.Status)"
+            }
+        } catch {
+            $this.Latitude = "Unknown"
+            $this.Longitude = "Unknown"
+            $this.TimeStamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Write-Warning "Error during geolocation: $($_.Exception.Message)"
+        }
+    }
 
-def count_visible_networks():
-    try:
-        result = subprocess.run([
-            "netsh", "wlan", "show", "networks"
-        ], capture_output=True, text=True, timeout=5)
-        output = result.stdout
-        return output.count("SSID ")
-    except Exception:
-        return 0
+    GetMapData() {
+        if ($this.Latitude -ne "Unknown" -and $this.Longitude -ne "Unknown") {
+            $Lat = $this.Latitude
+            $Long = $this.Longitude
+            try {
+                $nominatimUrl = "https://nominatim.openstreetmap.org/reverse?format=json&lat=$Lat&lon=$Long"
+                $headers = @{ 'User-Agent' = 'PowerShell Script (Personal Use)' }
+                $locationData = Invoke-RestMethod -Uri $nominatimUrl -Headers $headers -ErrorAction Stop
+                $this.ResolvedAddress = $locationData.display_name
+                $this.MapLink = "https://www.google.com/maps?q=$Lat,$Long"
+            } catch {
+                $this.ResolvedAddress = "Address resolution failed (API error)."
+                $this.MapLink = "https://www.google.com/maps?q=$Lat,$Long"
+                Write-Warning "Could not resolve address via Nominatim API. Error: $($_.Exception.Message)"
+            }
+        }
+    }
+}
 
-def check_wifi_status():
-    try:
-        result = subprocess.run([
-            "netsh", "wlan", "show", "interfaces"
-        ], capture_output=True, text=True, timeout=5)
-        output = result.stdout
-        lines = output.splitlines()
-        for i, line in enumerate(lines):
-            if "Radio status" in line:
-                for j in range(i+1, min(i+11, len(lines))):
-                    l = lines[j].strip()
-                    if l.lower().startswith("software"):
-                        if ':' in l:
-                            radio_sw = l.split(":",1)[-1].strip()
-                        else:
-                            radio_sw = l.split(None, 1)[-1].strip()
-                        return radio_sw == "On"
-                break
-    except Exception:
-        pass
-    return False
+Class SystemConfigInfo {
+    [string]$LocationPermission
+    [bool]$LocationServiceStatus
+    [string]$ConsentStoreLocation
+    [string]$WifiStatus
+    [int]$SSIDCount
+    [bool]$AirplaneMode
+   
+    GetLocationStatus() {
+        $locationReg = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors'
+        $this.LocationPermission = 'Unknown'
+        if (Test-Path $locationReg) {
+            $locRegVal = Get-ItemProperty -Path $locationReg -ErrorAction SilentlyContinue
+            if ($null -ne $locRegVal -and $locRegVal.PSObject.Properties.Name -contains 'DisableLocation') {
+                $disableLocation = $locRegVal.DisableLocation
+                if ($disableLocation -eq 0) {
+                    $this.LocationPermission = 'Enabled'
+                } elseif ($disableLocation -eq 1) {
+                    $this.LocationPermission = 'Disabled'
+                }
+            }
+        }
+    }
 
-def check_airplane_mode():
-    try:
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-            r"System\CurrentControlSet\Control\RadioManagement\SystemRadioState")
-        val, _ = winreg.QueryValueEx(key, "")
-        return int(val) == 1
-    except Exception:
-        return False
+    GetLocationServiceStatus() {
+        $locationRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\lfsvc\Service\Configuration"
+        try {
+            $locationReg = Get-ItemProperty -Path $locationRegPath -Name "Status" -ErrorAction Stop
+            if ($locationReg.Status -eq 1) {
+                $this.LocationServiceStatus = $True
+            } else {
+                $this.LocationServiceStatus = $False
+            }
+        } catch {
+            $this.LocationServiceStatus = $False
+        }
+    }
 
-def get_location():
-    # Use Windows Location API via ctypes
-    # This is a minimal approach using COM interfaces
-    try:
-        import pythoncom
-        import win32com.client
-        pythoncom.CoInitialize()
-        locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
-        service = locator.ConnectServer(".", "root\\CIMV2")
-        query = "SELECT * FROM Win32_Location"
-        locations = service.ExecQuery(query)
-        for loc in locations:
-            if hasattr(loc, "Latitude") and hasattr(loc, "Longitude"):
-                return float(loc.Latitude), float(loc.Longitude)
-    except Exception:
-        pass
-    # Fallback: Use GeoCoordinateWatcher via .NET (if available)
-    try:
-        import clr
-        clr.AddReference("System.Device")
-        from System.Device.Location import GeoCoordinateWatcher
-        watcher = GeoCoordinateWatcher()
-        watcher.Start()
-        import time
-        for _ in range(20):
-            if watcher.Status.ToString() == "Ready":
-                coord = watcher.Position.Location
-                if not coord.IsUnknown:
-                    return float(coord.Latitude), float(coord.Longitude)
-            time.sleep(0.25)
-    except Exception:
-        pass
-    return None, None
+    GetConsentStore() {
+        $consentReg = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location'
+        $this.ConsentStoreLocation = 'Unknown'
+        if (Test-Path $consentReg) {
+            try {
+                $val = Get-ItemProperty -Path $consentReg -Name 'Value' -ErrorAction Stop
+                $this.ConsentStoreLocation = $val.Value
+            } catch {
+                $this.ConsentStoreLocation = 'Error reading registry'
+            }
+        } else {
+            $this.ConsentStoreLocation = 'Not Found'
+        }
+    }
 
-def reverse_geocode(lat, lon):
-    try:
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
-        headers = {"User-Agent": "Python Script (Personal Use)"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("display_name", "Unknown")
-    except Exception:
-        pass
-    return "Address resolution failed (API error)."
+    GetWifiStatus() {
+        try {
+            $netshOutput = netsh wlan show interfaces 2>$null
+            if ($LASTEXITCODE -eq 0 -and $netshOutput) {
+                $lines = $netshOutput -split "`n"
+                $radioStatusFound = $false
+                
+                for ($i = 0; $i -lt $lines.Length; $i++) {
+                    if ($lines[$i] -match "Radio status") {
+                        $radioStatusFound = $true
+                        # Look for software radio status in the next few lines
+                        for ($j = $i + 1; $j -lt [Math]::Min($i + 11, $lines.Length); $j++) {
+                            $line = $lines[$j].Trim()
+                            if ($line -match "^\s*Software") {
+                                if ($line -match ":") {
+                                    $radioSw = ($line -split ":", 2)[1].Trim()
+                                } else {
+                                    $parts = $line -split "\s+", 2
+                                    if ($parts.Length -gt 1) {
+                                        $radioSw = $parts[1].Trim()
+                                    } else {
+                                        $radioSw = "Unknown"
+                                    }
+                                }
+                                $this.WifiStatus = if ($radioSw -eq "On") { "Enabled" } else { "Disabled" }
+                                return
+                            }
+                        }
+                        break
+                    }
+                }
+                
+                if ($radioStatusFound) {
+                    $this.WifiStatus = "Unknown"
+                } else {
+                    $this.WifiStatus = "Not Present"
+                }
+            } else {
+                $this.WifiStatus = "Not Present"
+            }
+        } catch {
+            $this.WifiStatus = "Error"
+        }
+    }
 
-def main():
-    print_header("Diagnostics")
-    # Registry checks
-    loc_exists, disable_loc = check_registry_key(
-        r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\LocationAndSensors", "DisableLocation")
-    app_exists, let_apps = check_registry_key(
-        r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy", "LetAppsAccessLocation")
-    location_enabled = (not loc_exists or disable_loc is None or disable_loc == 0)
-    wifi_enabled = check_wifi_status()
-    ssid_count = count_visible_networks() if wifi_enabled else 0
-    wifi_status = "Enabled/Available" if wifi_enabled else "Not available or disabled"
-    wifi_color = "green" if wifi_enabled else "red"
-    airplane_on = check_airplane_mode()
-    airplane_status = "Enabled" if airplane_on else "Disabled"
-    airplane_color = "red" if airplane_on else "green"
-    location_status = "Enabled" if location_enabled else "Disabled"
-    location_color = "green" if location_enabled else "red"
-    print(f"{'Location Services':<22}: {color(location_status, location_color)}")
-    print(f"{'Wi-Fi':<22}: {color(wifi_status, wifi_color)}")
-    print(f"{'Visible Network Count':<22}: {color(str(ssid_count), 'green')}")
-    print(f"{'Airplane Mode':<22}: {color(airplane_status, airplane_color)}")
-    print()
-    if not wifi_enabled or airplane_on:
-        print(color("Unable to perform Wi-Fi triangulation. GeoLocation will be based off of IP address. Accuracy may vary.", "yellow"))
-    if not location_enabled:
-        print(color("Unable to launch GeoLocator due to location permissions. Please verify that location permissions and services are enabled before trying again.", "red"))
-        print_header("Location Permissions")
-        if loc_exists:
-            print(color(f"Registry key exists: HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors", "green"))
-            if disable_loc is not None:
-                if disable_loc == 0:
-                    print(color("DisableLocation: 0 (Location services enabled)", "green"))
-                else:
-                    print(color("DisableLocation: 1 (Location services disabled)", "red"))
-            else:
-                print(color("DisableLocation value is missing", "yellow"))
-        else:
-            print(color("Registry key missing: HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors", "red"))
-        if app_exists:
-            print(color(f"Registry key exists: HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\AppPrivacy", "green"))
-            if let_apps is not None:
-                if let_apps == 1:
-                    print(color("LetAppsAccessLocation: 1 (Enabled)", "green"))
-                else:
-                    print(color(f"LetAppsAccessLocation: {let_apps} (Disabled)", "red"))
-            else:
-                print(color("LetAppsAccessLocation value is missing", "yellow"))
-        else:
-            print(color("Registry key missing: HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\AppPrivacy", "red"))
-        return
-    print_header("GeoLocator Results")
-    lat, lon = get_location()
-    if lat is not None and lon is not None:
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"{'Latitude':<22}: {color(str(lat), 'magenta')}")
-        print(f"{'Longitude':<22}: {color(str(lon), 'magenta')}")
-        print(f"{'Timestamp':<22}: {color(timestamp, 'magenta')}")
-        address = reverse_geocode(lat, lon)
-        gmaps = f"https://www.google.com/maps?q={lat},{lon}"
-        print(f"{'Resolved Address':<22}: {color(address, 'cyan')}")
-        print(f"{'Google Maps Link':<22}: {color(gmaps, 'cyan')}")
-    else:
-        print(color("GPS coordinates could not be resolved or are unknown.", "yellow"))
+    GetSsidCount() {
+        try {
+            $netshNetworks = netsh wlan show networks 2>$null
+            if ($netshNetworks) {
+                $this.SSIDCount = ($netshNetworks | Select-String -Pattern '^SSID\s+\d+\s+:' | Measure-Object).Count
+            } else {
+                $this.SSIDCount = 0
+            }
+        } catch { $this.SSIDCount = 0 }
+    }
 
-if __name__ == "__main__":
-    main()
+    GetAirplaneStatus() {
+        $RadioMgmtKey = "HKLM:\SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState"
+        try {
+            $RadioMgmtState = Get-ItemProperty $RadioMgmtKey -ErrorAction Stop
+            if ($RadioMgmtState.'(default)' -eq 0 ) {
+                $this.AirplaneMode = $False 
+            } else {
+                $this.AirplaneMode = $True 
+            }
+        } catch {
+            $this.AirplaneMode = $False
+        }
+    }
+
+    ScanConfig() {
+        $this.GetLocationStatus()
+        $this.GetConsentStore()
+        $this.GetLocationServiceStatus()
+        $this.GetWiFiStatus()
+        $this.GetSSIDCount()
+        $this.GetAirplaneStatus()
+    }
+}
+
+## -- Functions --
+function Write-DiagnosticsOutput($systemConfig) {
+    Write-Host ""
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host "           Diagnostics         " -ForegroundColor Cyan
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $locationColor = if ($systemConfig.LocationPermission -eq 'Enabled') { 'Green' } else { 'Red' }
+    $serviceColor = if ($systemConfig.LocationServiceStatus -eq $true) { 'Green' } else { 'Red' }
+    $consentColor = if ($systemConfig.ConsentStoreLocation -eq 'Allow') { 'Green' } else { 'Red' }
+    $wifiColor = if ($systemConfig.WifiStatus -eq 'Enabled') { 'Green' } else { 'Yellow' }
+    $airplaneColor = if ($systemConfig.AirplaneMode) { 'Red' } else { 'Green' }
+    
+    Write-Host ("{0,-25}: {1}" -f 'Location Permission', $systemConfig.LocationPermission) -ForegroundColor $locationColor
+    Write-Host ("{0,-25}: {1}" -f 'Location Service Status', $systemConfig.LocationServiceStatus) -ForegroundColor $serviceColor
+    Write-Host ("{0,-25}: {1}" -f 'Consent Store Location', $systemConfig.ConsentStoreLocation) -ForegroundColor $consentColor
+    Write-Host ("{0,-25}: {1}" -f 'Wi-Fi Status', $systemConfig.WifiStatus) -ForegroundColor $wifiColor
+    Write-Host ("{0,-25}: {1}" -f 'Visible Network Count', $systemConfig.SSIDCount) -ForegroundColor Green
+    Write-Host ("{0,-25}: {1}" -f 'Airplane Mode', $systemConfig.AirplaneMode) -ForegroundColor $airplaneColor
+    Write-Host ""
+}
+
+function Write-LocationOutput($locationInfo) {
+    Write-Host ""
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host "      GeoLocator Results       " -ForegroundColor Cyan
+    Write-Host "===============================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    Write-Host ("{0,-22}: {1}" -f 'IP Address', $locationInfo.IPAddress) -ForegroundColor White
+    Write-Host ("{0,-22}: {1}" -f 'ISP', $locationInfo.ISP) -ForegroundColor White
+    Write-Host ("{0,-22}: {1}" -f 'Latitude', $locationInfo.Latitude) -ForegroundColor Magenta
+    Write-Host ("{0,-22}: {1}" -f 'Longitude', $locationInfo.Longitude) -ForegroundColor Magenta
+    Write-Host ("{0,-22}: {1}" -f 'Timestamp', $locationInfo.TimeStamp) -ForegroundColor Magenta
+    Write-Host ("{0,-22}: {1}" -f 'Resolved Address', $locationInfo.ResolvedAddress) -ForegroundColor Cyan
+    Write-Host ("{0,-22}: {1}" -f 'Google Maps Link', $locationInfo.MapLink) -ForegroundColor Cyan
+    Write-Host ""
+}
+
+## Main Logic
+try {
+    # Initialize classes and scan system configuration
+    $SystemConfig = [SystemConfigInfo]::new()
+    $SystemConfig.ScanConfig()
+    
+    # Display diagnostics
+    Write-DiagnosticsOutput $SystemConfig
+    
+    # Check if location services are properly configured
+    $canProceed = $true
+    if ($SystemConfig.LocationPermission -eq 'Disabled') {
+        Write-Host "Location services are disabled by policy. Cannot proceed with geolocation." -ForegroundColor Red
+        $canProceed = $false
+    }
+    
+    if ($SystemConfig.ConsentStoreLocation -eq 'Deny') {
+        Write-Host "Location access is denied in consent store. Cannot proceed with geolocation." -ForegroundColor Red
+        $canProceed = $false
+    }
+    
+    # Warn about potential issues
+    if ($SystemConfig.WifiStatus -eq 'Disabled' -or $SystemConfig.AirplaneMode) {
+        Write-Host "Warning: Wi-Fi is disabled or Airplane Mode is enabled. Location accuracy may be reduced." -ForegroundColor Yellow
+    }
+    
+    if ($canProceed) {
+        # Get location information
+        $LocationInfo = [LocationEventInfo]::new()
+        Write-Host "Retrieving IP information..." -ForegroundColor Yellow
+        $LocationInfo.GetIpData()
+        
+        Write-Host "Attempting to get GPS coordinates (timeout: 5 seconds)..." -ForegroundColor Yellow
+        $LocationInfo.GetGeoData()
+        
+        if ($LocationInfo.Latitude -ne "Unknown" -and $LocationInfo.Longitude -ne "Unknown") {
+            Write-Host "Resolving address from coordinates..." -ForegroundColor Yellow
+            $LocationInfo.GetMapData()
+        }
+        
+        # Display results
+        Write-LocationOutput $LocationInfo
+    } else {
+        Write-Host "Cannot proceed with geolocation due to permission/policy issues." -ForegroundColor Red
+    }
+    
+} catch {
+    Write-Error "An error occurred during execution: $($_.Exception.Message)"
+} finally {
+    Write-Host "Script execution completed." -ForegroundColor Green
+}
+'''
+
+try:
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+        capture_output=True, text=True, timeout=60
+    )
+    stdout = completed.stdout.strip()
+    if not stdout:
+        stdout = completed.stderr.strip()
+
+    print(stdout)
+except subprocess.TimeoutExpired:
+    print("PowerShell command timed out.")
+    sys.exit(1)
+except Exception as e:
+    print(f"Failed to get location: {e}")
+    sys.exit(1)
