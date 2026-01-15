@@ -1,68 +1,162 @@
-# GeoWatcher.ps1
-In short, the main purpose of this script is to pull a set of geocoordinates from a Windows computer and then map that to a physical address, like so:
+# GeoLocator - Geolocation Analysis Scripts
 
-<img width="920" height="420" alt="image" src="https://github.com/user-attachments/assets/a678ee28-b066-420d-a704-a86310fe76c2" />
+## Overview
 
-In long, how the GeoLocator script works is relatively simple, utilizing features already built into Windows itself. It starts with a .NET class called [GeoCoordinateWatcher](https://learn.microsoft.com/en-us/dotnet/api/system.device.location.geocoordinatewatcher?view=netframework-4.8.1), which belongs to the System.Device.Location namespace that exposes location data via the system location stack.
-Its main purpose is to provide an interface to the platform’s fused location provider, allowing Windows applications to obtain periodic or one-time geographic positions without directly implementing or interacting with low-level sensor logic.
-
-From a conceptual standpoint, here is how the data flow would look when utilizing this class:
-* **Initialization**: The script instantiates the GeoCoordinateWatcher and invokes the TryStart() method.
-* **Request**: The watcher queries the OS location stack for the most recent and reliable geographic fix.
-* **Aggregation**: The OS polls available hardware sensors (Wi-Fi, GPS, Cellular, or IP).
-* **Exposure**: The GeoCoordinateWatcher exposes the resulting latitude and longitude via its Position property.
-
+The **GeoLocator** scripts are a set of PowerShell scripts designed to assist with the geolocation analysis of an endpoint. To sum up its functionality, it uses the [GeoCoordinateWatcher](https://learn.microsoft.com/en-us/dotnet/api/system.device.location.geocoordinatewatcher?view=netframework-4.8.1) .NET class to retreive a set of coordinates from the computer and then maps that out to a physical address to determine the true location of the device. 
 The script’s accuracy is dependent on which hardware sensors are active. The hierarchy of reliability is as follows:
 * **Wi-Fi-Based Positioning (WPS)**: The script’s primary weapon against VPNs. By scanning for nearby SSIDs/BSSIDs and their signal strengths, the OS queries the Microsoft Location Service (or a similar backend) to map that unique "radio fingerprint" to known coordinates. Even with only 3-5 visible access points, accuracy can typically be narrowed down to within 100 meters.
 * **GPS/GNSS**: If the device is equipped with a dedicated GPS receiver (standard on many "Rugged" or high-end mobile laptops), accuracy is pinpoint, often within a few meters.
 * **Cellular Triangulation**: For LTE/5G enabled devices, the service measures signal propagation from nearby towers. Accuracy ranges from 50 to 500 meters depending on tower density.
 * **IP Address (Fallback)**: This is the method of last resort. While it provides a city-level approximation, it is the only method susceptible to being misled by a VPN.
 
-Once coordinates are retrieved, the script performs a reverse-geocoding lookup via [Nominatim OpenStreetMap](https://nominatim.openstreetmap.org/). The output provides a structured report including a timestamp, coordinates, a Google Maps hyperlink, and a resolved physical address.
+The script also checks the machine's IP against [IP-API](https://ip-api.com/) to retrieve the IP's coordinates, ISP, and whether it belong to a known Proxy/VPN service, a datacenter, or a hotspot.
 
-At the beginning of this page is an example of the output when running the script to find my own location.
+It then provides a risk assessment and looks for disrepencies in the geolocator results, such a the machine being connected to a VPN, a mismatch between the machine's geolocation and the IP's, being located out of country, etc.
 
-For obvious reasons, I have redacted the longitude and the resolved address from the output; however, I can confirm that the resolved address matched a house located within 100 meters.
-
-For easier toubleshooting, there is also an integrated a Pre-Flight Diagnostic Check. This verifies the status of:
-* **Location Services**: Ensuring the system-wide privacy toggle is enabled.
-* **Wi-Fi Status**: Confirming the adapter is active (even if not connected to a network).
-* **Airplane Mode**: Verifying that wireless radios are not being suppressed.
-<img width="975" height="331" alt="image" src="https://github.com/user-attachments/assets/00de2fb5-db27-4d45-bea5-df3b1b9333ea" />
-
-
-
-# How to use this script
-
-The script requires Location permissions to be enabled on the machine for this to work.
-
-I highly recommend ensuring Wi-Fi is enabled as well, as without it, the geocoordinates will be based solely on the IP address (unless the device actually has GPS or Cellular capabilities). I included instructions in the troubleshooting notes for the Wi-Fi if you face issues.
-
-To check location permissions, you can run this PowerShell command:
-```powershell
-Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors" -Name "DisableLocation"
 ```
-Value 0 means that your location is enabled. If it is disabled, run:
-```powershell
-Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors" -Name "DisableLocation" -Value 0
+===============================
+           Diagnostics         
+===============================
+
+Location Permission      : Enabled
+Location Service Status  : True
+Consent Store Location   : Allow
+Wi-Fi Status            : Enabled
+Visible Network Count   : 5
+Airplane Mode           : False
+
+===============================
+      GeoLocator Results       
+===============================
+
+IP Address              : 173.239.196.41
+ISP                     : M247 Ltd
+IP Coordinates          : 40.7128,-74.0060
+Country Code            : US
+Region Name             : New York
+Mobile                  : False
+Proxy                   : True
+Hosting                 : False
+Machine Coordinates     : -23.5615, -46.6559
+Timestamp              : 2026-01-14 15:30:45
+Resolved Address       : Av. Paulista, 1578 - Bela Vista, São Paulo - SP, 01310-200, Brazil
+Address Country Code   : BR
+Google Maps Link       : https://www.google.com/maps?q=-23.5615,-46.6559
+
+===============================
+       Risk Assessment         
+===============================
+
+Known Proxy/VPN Connection
+IP and Machine Location Do Not Match
+Machine Out of Country
 ```
-This is the equivalent of going into Settings > Privacy & security > Location and enabling Location Services. You should now be able to copy the script to your machine and run via Powershell.
 
-It's worth mentioning that I included multiple versions of the script to choose from. There is no difference in their functionality, just their format.
+Three scripts are included in this repository:
+1. **GeoLocator.ps1** - main script designed for manual analysis during investigations. Can be ran directly on machine or remotely through your preferred RMM/EDR/XDR.
+2. **GeoLocator.py** - a python wrapped version of the same script, as Cortex XDR would only allow Python scripts in their Script Agent Library.
+3. **ScheduledGeoLocator.ps1** - designed to be ran on an automated basis to monitor machines for risky behavior, such as VPNs, location changes, large differences between IP location and machine location, and more. Outputs results to Windows Event Logs for easy SIEM ingestion.
 
-* GeoLocator.ps1 is the standard powershell script that you can import into your RMM tool and run, or drop on the device and execute remotely.
-* GeoLocator.py performs the exact same functionality, but python.
-* GeoLocatorXDR.py is a python version that can be ran through various EDR/XDR/RMM tools. I made this because Cortex XDR only allowed python scripts to be ran from their agent library, but it was very limited on the modules you could use.
-* ScheduledGeoLocator.ps1 is a powershell script meant to be triggered from a scheduled task to run the GeoLocator script on a daily basis. It logs all results to the Application log beneath event IDs 2001 and 2002. This will receive its own README.
-*SuspiciousNetNeighbors.py is a python script for checking a machine's ARP cache table for various suspicious devices, such as GL.iNET routers. Can assist with potentially detecting users that may be hiding their location. Will receive its own README.
-# Troubleshooting
+## Purpose
 
-The main purpose of these troubleshooting notes is for when you are trying to run this script on a machine where you do not have physical access to it and can only access the machine via a remote PowerShell terminal.
+In 2025 alone, my team discovered 5 separate users that had successfully taken our company equipment overseas, 1 of which was confirmed to be associated with the DPRK. They completely flew under the radar, bypassing our georestriction policies by doing something as simple as hiding behind a VPN and disabling their location services. 
 
-If you have access to the desktop, this can all be summarized to ensure your Wi-Fi is on, that location settings are enabled (Settings > Privacy & security > Location), and that Airplane Mode is not enabled.
+See, remote work operates on a high-stakes paradox: it is an organizational infrastructure built almost entirely on blind trust. This foundation is already stretched thin by the inherent risks of a distributed workforce – specifically the practice of shipping hundreds, if not thousands, of dollars in high-end equipment to individuals who may never exist to the company beyond a 2D tile on a Zoom call and whose location we can only entrust our tools to verify.
 
-**Location Permissions**
+When a company allows an employee to work outside the protection of the company’s physical office, they are essentially offloading a portion of their operational security into an unmonitored environment, relying on a fragile psychological contract between employer and employee.
 
+The threat isn't just employees looking to abuse their ability to take their computer on vacation or fulfill their dream of living overseas without losing their income. Remote work is being increasingly exploited by hostile foreign threat actors posing as domestic remote workers to secure a position within American companies. 
+A perfect example of this lies within [Jasper Sleet](https://www.microsoft.com/en-us/security/blog/2025/06/30/jasper-sleet-north-korean-remote-it-workers-evolving-tactics-to-infiltrate-organizations/), Microsoft's project to track North Korean IT remote worker activity as they continuously present themselves as domestic-based teleworkers to generate revenue and support state interests for the DPRK.
+
+This script is a simple, no-cost solution for investigating and detecting these actors utilizing nothing more than what comes built into Windows itself.
+
+
+## How It Functions
+
+
+
+#### 1. **Diagnostics**
+Before initiating the full geolocation lookup, the script performs a comprehensive system diagnostics check to verify the machine has full location checking capabilities and the proper permissions are in place. 
+This isn't just to help with troubleshooting. Threat actors tend to "harden" their computers by disabling these services and enabling Airplane Mode to ensure there are no wireless connections reaching out to give away their location. 
+A desktop with permissions denied, airplane mode enabled, and a VPN address would likely be a dead giveaway for a potential suspect.
+- **Location Permission**: Checks "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors" to verify location permisions are enabled.
+- **Location Service Status**: Checks "HKLM:\SYSTEM\CurrentControlSet\Services\lfsvc\Service\Configuration" to verify the location service is running.
+- **Consent Store**: Checks "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" to verify consent for Location Services.
+- **Wi-Fi Status**: Checks that Wi-Fi is available. Wi-Fi does **NOT** have to be connected for the script to function accurately, only available.
+- **Visible Network Count**: Checks how many Wi-Fi access points are seen by the machine. The more access points available, the higher the accuracy of the script as it uses Wi-Fi triangulation as it's primary source for geolocation.
+- **Airplane Mode**: Checks "HKLM:\\System\\CurrentControlSet\\Control\\RadioManagement\\SystemRadioState" to verify if airplane mode is disabled.
+
+The geolocation section of this script will **NOT** function without the location permissions, consent, and service enabled.
+If Wi-Fi is disabled, the geolocation check will default to an IP lookup, which is less accurate and easily fooled by VPNs.
+
+
+#### 2. **GeoLocator Results**
+
+The **GeoLocator Results** section displays the collected geolocation data in a clear, organized format. This output provides both IP-based (utilizing [IP-API](https://ip-api.com/)) and device-based location information, allowing you to compare the external network location with the actual physical location of the machine.
+
+**Key fields include:**
+- **IP Address**: The public IP address as seen by external services.
+- **ISP**: The Internet Service Provider associated with the IP.
+- **IP Coordinates**: Latitude and longitude derived from the IP address.
+- **Country Code / Region Name**: Country and region associated with the IP.
+- **Mobile / Proxy / Hosting**: Flags indicating if the connection is via mobile, proxy/VPN, or hosting provider.
+- **Machine Coordinates**: Actual device-reported latitude and longitude (from Windows location services).
+- **Timestamp**: When the machine coordinates were obtained.
+- **Resolved Address**: Human-readable address resolved from the device coordinates.
+- **Address Country Code**: Country code of the resolved address.
+- **Google Maps Link**: Direct link to view the device location on Google Maps.
+
+#### 3. **Risk Assessment**
+Automatically evaluates potential security concerns:
+- **Connection Type Risks**: Identifies mobile hotspots, proxies, or VPN usage
+- **Country Verification**: Flags foreign IP addresses or physical locations
+- **Location Spoofing Detection**: Identifies significant coordinate differences between IP coordinates and Machine.
+```
+===============================
+      GeoLocator Results       
+===============================
+
+IP Address              : 173.239.196.41
+ISP                     : M247 Ltd
+IP Coordinates          : 40.7128,-74.0060
+Country Code            : US
+Region Name             : New York
+Mobile                  : False
+Proxy                   : True
+Hosting                 : False
+Machine Coordinates     : -23.5615, -46.6559
+Timestamp              : 2026-01-14 15:30:45
+Resolved Address       : Av. Paulista, 1578 - Bela Vista, São Paulo - SP, 01310-200, Brazil
+Address Country Code   : BR
+Google Maps Link       : https://www.google.com/maps?q=-23.5615,-46.6559
+
+===============================
+       Risk Assessment         
+===============================
+
+Known Proxy/VPN Connection
+IP and Machine Location Do Not Match
+Machine Out of Country
+```
+
+
+## Troubleshooting
+In some cases, you may need to manually enable location permissions or even the Wi-Fi to get the most out of this script. Review the diagnostics output and use the following PowerShell command to troubleshoot.
+```
+===============================
+           Diagnostics         
+===============================
+
+Location Permission      : Disabled
+Location Service Status  : True
+Consent Store Location   : Deny
+Wi-Fi Status            : Disabled
+Visible Network Count   : 5
+Airplane Mode           : True
+```
+
+
+#### Location Permissions
 Check main location permissions:
 ```powershell
 Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors" -Name "DisableLocation"
@@ -71,15 +165,24 @@ Value 0 means location is enabled. If disabled, run:
 ```powershell
 Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\LocationAndSensors" -Name "DisableLocation" -Value 0
 ```
-If you still receive location permission errors, you may need to check the AppPrivacyKey:
+Check that the location service is enabled:
 ```powershell
-Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\AppPrivacy" -Name "LetAppsAccessLocation"
+Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\lfsvc" -Name "Start"
 ```
-The value should be set to 1. If the value is zero, or the key doesn't exist, run the following:
+Value 4 means disabled. Set it to 2 for automatic startup and start the service with:
 ```powershell
-Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows\\AppPrivacy" -Name "LetAppsAccessLocation" -Type DWord -Value 1 -Force
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\lfsvc" -Name "Start" -Value 2 | Start-Service -Name "lfsvc"
 ```
-**Wi-Fi Connectivity**
+Check Consent Store:
+```powershell
+Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" -Name "Value"
+```
+The value should be set to Allow. If the value is Deny, run the following:
+```powershell
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" -Name "Value" -Value "Allow" -Force
+```
+
+##### Wi-Fi Connectivity
 
 Check for network interfaces:
 ```powershell
@@ -91,11 +194,11 @@ Enable-netAdapter -Name "Wi-Fi" (may need to replace interface name if different
 ```
 Check the interface again. If the adapter still shows 'Software Off,' then it is possible that the machine is currently in Airplane Mode. You can check with:
 ```powershell
-_(\[int\](Get-ItemProperty "HKLM:\\System\\CurrentControlSet\\Control\\RadioManagement\\SystemRadioState").'(default)' -eq 1)_
+(Get-ItemProperty "HKLM:\\System\\CurrentControlSet\\Control\\RadioManagement\\SystemRadioState").'(default)' -eq 1
 ```
 If results return true, you can try to disable airplane mode by running:
 ```powershell
-_Set-ItemProperty -Path "HKLM:\\System\\CurrentControlSet\\Control\\RadioManagement\\SystemRadioState" -Name "(default)" -Value 0_
+Set-ItemProperty -Path "HKLM:\\System\\CurrentControlSet\\Control\\RadioManagement\\SystemRadioState" -Name "(default)" -Value 0
 ```
 Then either reboot the machine run this to try and force your network adapters to enable:
 ```powershell
@@ -105,40 +208,17 @@ Check your adapters and verify that the Software shows as 'On' for the Wi-Fi. If
 
 If not, try running the Toggle-WifiRadio.ps1 script, then check the interface again. I included a one-line version of this script to easily post it straight into the terminal.
 
-This was an issue I experienced where I verified that Airplane Mode was disabled, but I still could not enable Wi-Fi via PowerShell (whether it be lack of skill or a technical error). Since this issue only occurred on a single machine, I was unable to verify the exact cause of the problem, but the script I created seemed to do the trick.
+This was an issue I experienced where I verified that Airplane Mode was disabled, but I still could not enable Wi-Fi via PowerShell (whether it be lack of skill or a technical error). Since this issue only occurred on a single machine, I was unable to verify the exact cause of the problem, but the script seemed to do the trick.
 
-# Who should use this, and why?
 
-Security Analysts and any IT personnel who have a suspicion that one of their remote users may not be exactly where they claim to be (or where their IP says they are…) 
 
-Remote work operates on a high-stakes paradox: it is an organizational infrastructure built almost entirely on blind trust. This foundation is already stretched thin by the inherent risks of a distributed workforce – specifically the practice of shipping hundreds, if not thousands, of dollars in high-end equipment to individuals who may never exist to the company beyond a 2D tile on a Zoom call.
+### Minimum System Requirements
+- Windows 10 build 1903 or higher
+- PowerShell 5.1 or PowerShell 7+
+- Internet connection for external APIs
 
-When a company allows an employee to work outside the protection of the company’s physical office, they are essentially offloading a portion of their operational security into an unmonitored environment, relying on a fragile psychological contract between employer and employee.
-
-It isn't just employee's looking to abuse their ability to take their computer on vacation that are the threat. 
-
-Remote work is often exploited by hostile foreign threat actors posing as domestic remote workers to secure a position within American companies. A perfect example of this lies within [Jasper Sleet](https://www.microsoft.com/en-us/security/blog/2025/06/30/jasper-sleet-north-korean-remote-it-workers-evolving-tactics-to-infiltrate-organizations/), Microsoft's project to track North Korean IT remote worker activity as they continuously present themselves as domestic-based teleworkers to generate revenue and support state interests for the DPRK.
-
-If you have the slightest suspicion that a company-owned device is somewhere it shouldn't be, like when noticing it is hiding behind a VPN, this script can help to verify it down to the coordinates.
-
-Detailed below is an incident I experienced that contributed to the creation of this script. 
-
-# Incident Overview
-
-In December 2025, we flagged a suspicious user, who we will refer to as "Allen." The initial red flag was not a security alert, but a performance-based support ticket. Allen’s supervisor reported that he was experiencing persistent latency and network instability issues that hindered his ability to access various clients. 
-A diagnostic speed test using the [Ookla CLI tool](https://www.speedtest.net/apps/cli) confirmed elevated latency, attributable to an active VPN connection through ProtonVPN.
-
-Further investigation revealed that the user had a VPN configured on a travel router, specifically the [GL-MT3000](https://www.gl-inet.com/products/gl-mt3000/), a travel router specifically marketed for its ability to run WireGuard or OpenVPN at the hardware level. He was using this to show his computer as residing in Denver, Colorado.
-
-While there was no malicous activity to note within his day-to-day operations, multiple disrepancies were noted that warranted investigating him further, such as:
-* His place of residence and shipping address for his equipment was discovered to be a UPS store.
-* He provided a passport instead of a driver's license during onboarding. A bit of OSINT on his passport number revealed a 1 year work visa to Brazil.
-* The cellphone used for 2FA was also connected to a VPN. On one of his authentication requests, he forgot to connect it to the VPN and was shown as being located in Brazil.
-* Location services and Wi-Fi were both found to be disabled on his workstation, along with Airplane Mode enabled to disable all wireless services.
-
-Using the methods previously detailed, we silently enabled his Wi-Fi and location services and ran this script through our XDR service to discover he had exported our equipment to Brazil.
-
-Since then, we have also discovered user's located in Mexico and Grenada as well using the same methodology.
-
-Now I can't guarantee that your endeavors with this will be as interesting, but hopefully this helps someone out there. Happy hunting!
+### Network Requirements
+- HTTP/HTTPS access to:
+  - `ip-api.com` (IP geolocation)
+  - `nominatim.openstreetmap.org` (address resolution)
 
