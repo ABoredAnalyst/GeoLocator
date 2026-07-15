@@ -1,5 +1,7 @@
 # ScheduledGeoLocator.ps1 Setup Guide
 
+***This is still under development and has not been tested in an actual enterprise environment on a scheduled basis***
+
 This script designed to be ran on a scheduled basis for automated geolocation monitoring that logs location data and changes to Windows Event Logs for easy SIEM integration and alerting.
 
 ## Quick Start
